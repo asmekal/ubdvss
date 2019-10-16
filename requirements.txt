@@ -1,0 +1,9 @@
+imgaug
+tensorflow-gpu
+numpy
+pandas
+opencv-python>=3.4,<4.0
+keras
+shapely
+pillow
+
