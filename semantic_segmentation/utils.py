@@ -1,9 +1,10 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
 Всевозможные вспомогательные функции
 """
+import glob
 import logging
 import os
 
@@ -29,21 +30,26 @@ def fix_quadrangle(quad):
 
 
 def pillow_rgb_fromarray(img):
+    img = img.astype(np.uint8)
     if img.ndim == 3 and img.shape[-1] == 3:
         return Image.fromarray(img, 'RGB')
 
-    image = img
-    if image.ndim == 3 and image.shape[-1] == 1:
-        image = np.squeeze(image, -1)
-    assert image.ndim == 2  # серое изображение
-    pillow_image = Image.fromarray(image, 'L').convert('RGB')
-    return pillow_image
+    return pillow_grey_fomarray(img).convert('RGB')
+
+
+def pillow_grey_fomarray(img, dsize=None):
+    img = img.astype(np.uint8)
+    if img.ndim == 3 and img.shape[2] == 1:
+        img = img.squeeze(axis=2)
+    assert img.ndim == 2  # серое изображение
+    img = Image.fromarray(img, 'L')
+    if dsize is not None and img.size != dsize:
+        img = img.resize(dsize, resample=Image.NEAREST)
+    return img
 
 
 def get_contours_and_boxes(seg_map, min_area=10):
-    _seg_map = seg_map
-
-    _, cnts, _ = cv2.findContours(np.array(_seg_map, dtype=np.uint8),
+    _, cnts, _ = cv2.findContours(np.array(seg_map, dtype=np.uint8),
                                   mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
 
     cnts = list(filter(lambda cnt: cv2.contourArea(cnt) > min_area, cnts))
@@ -54,21 +60,25 @@ def get_contours_and_boxes(seg_map, min_area=10):
     return cnts, boxes
 
 
+def get_convex_hull(contour):
+    return cv2.convexHull(contour)
+
+
 def rescale_bbox(bbox, xscale, yscale):
-    scale = np.array([xscale, yscale] * 4)
+    scale = np.array([xscale, yscale] * (len(bbox) // 2))
     return (bbox * scale).astype(int)
 
 
 def rescale_bboxes(bboxes, xscale, yscale):
     if not bboxes:
         return bboxes
-    scale = np.array([xscale, yscale] * 4)
+    scale = np.array([xscale, yscale] * (len(bboxes[0]) // 2))
     return (bboxes * scale).astype(int)
 
 
 def get_polygon_sides_lengths(poly):
     """
-    возвращает длины сторон многоугольника, заданного своими вершинами
+    Возвращает длины сторон многоугольника, заданного своими вершинами
     :param poly:
     :return:
     """
@@ -80,6 +90,13 @@ def is_quad_square(quad, treshold=0.1):
     return 1. * (max(sides_lengths) - min(sides_lengths)) / max(sides_lengths) < treshold
 
 
+IMAGE_EXTENSIONS = ('.png', '.tiff', '.tif', '.bmp', '.jpg', '.jpeg')
+
+
+def is_image_extension(ext):
+    return ext.lower() in IMAGE_EXTENSIONS
+
+
 def find_corresponding_image(images_folder_path, fname_without_ext):
     """
     Находит изображение с тем же именем, что и файл разметки, если такого нет кидает исключение
@@ -87,16 +104,16 @@ def find_corresponding_image(images_folder_path, fname_without_ext):
     :param fname_without_ext:
     :return:
     """
-    for image_ext in ('.png', '.tiff', '.tif', '.bmp', '.jpg'):
-        candidate_fname = fname_without_ext + image_ext
-        if os.path.exists(os.path.join(images_folder_path, candidate_fname)):
-            return os.path.join(images_folder_path, candidate_fname)
+    for full_image_name in glob.glob(os.path.join(images_folder_path, fname_without_ext) + '.*'):
+        image_ext = os.path.splitext(full_image_name)[1]
+        if is_image_extension(image_ext):
+            return fname_without_ext + image_ext
     raise ValueError("Image corresponding to fname {} not found (skipping markup)".format(fname_without_ext))
 
 
 def extract_bboxes_and_object_types(image_markup, net_config, object_types_format="name"):
     """
-    разделяет разметку на прямоугольники и типы этих прямоугольников
+    Разделяет разметку на прямоугольники и типы этих прямоугольников
     :param image_markup: разметка изображения - список ObjectMarkup
     :param net_config:
     :param object_types_format: "name" - возвращать названия классов (строчку), "id" - возвращать id классов (int)

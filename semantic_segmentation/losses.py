@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
 Различные функции потерь для обучения
 """
@@ -32,9 +32,12 @@ def _prepare_detection_logits(y_true, y_pred):
 
 def detection_loss(y_true, y_pred):
     """
-    loss чисто за детекцию - смотрим первую компоненту y_pred считая ее логитом вероятности того что здесь есть объект
-    :param y_true:
-    :param y_pred:
+    Вычисляет loss чисто за детекцию -
+    смотрим первый канал y_pred считая его логитом вероятности того что здесь есть объект
+    :param y_true: y_true.shape == (bs, h, w, 1) содержит целые числа от 0 до n_classes включительно
+            y_true[..., 0] = 0 когда на этом месте нет объекта вообще
+            y_true[..., 0] = i > 0 значит класс объекта на этом месте i-1
+    :param y_pred: y_pred.shape == (bs, h, w, 1 + n_classes)
     :return:
     """
     detection_true, detection_pred = _prepare_detection_logits(y_true, y_pred)
@@ -43,11 +46,11 @@ def detection_loss(y_true, y_pred):
 
 def detection_and_classification_loss(y_true, y_pred):
     """
-    суммарный лосс за детекцию + классификацию
-    :param y_true: y_true.shape == (bs, h, w, 1 + n_classes)
-    :param y_pred: y_pred.shape == (bs, h, v, 1) содержит целые числа от 0 до n_classes включительно
-            y_pred[...] = 0 когда на этом месте нет объекта вообще
-            y_pred[...] = i > 0 значит класс объекта на этом месте i-1
+    Суммарный лосс за детекцию + классификацию
+    :param y_true: y_true.shape == (bs, h, w, 1) содержит целые числа от 0 до n_classes включительно
+            y_true[..., 0] = 0 когда на этом месте нет объекта вообще
+            y_true[..., 0] = i > 0 значит класс объекта на этом месте i-1
+    :param y_pred: y_pred.shape == (bs, h, w, 1 + n_classes)
     :return:
     """
     loss_detection = detection_loss(y_true, y_pred)
@@ -61,10 +64,12 @@ def detection_and_classification_loss(y_true, y_pred):
 
 def classification_loss(y_true, y_pred):
     """
-    кроссэнтропия для каждого пикселя который есть хоть в каком-то объекте
-    для пикселей фона лосс не считается
-    :param y_true:
-    :param y_pred:
+    Вычисление кроссэнтропии для каждого пикселя который есть хоть в каком-то объекте
+    (для пикселей фона лосс зануляется)
+    :param y_true: y_true.shape == (bs, h, w, 1) содержит целые числа от 0 до n_classes включительно
+            y_true[..., 0] = 0 когда на этом месте нет объекта вообще
+            y_true[..., 0] = i > 0 значит класс объекта на этом месте i-1
+    :param y_pred: y_pred.shape == (bs, h, w, 1 + n_classes)
     :return:
     """
     positive_mask = K.cast(y_true > 0, tf.float32)
@@ -80,7 +85,7 @@ def classification_loss(y_true, y_pred):
 
 def binary_classification_loss(y_true, y_pred):
     """
-    лосс при сегментации на 2 класса 0 - фон, 1 - целевой класс
+    Вычисляет лосс при сегментации на 2 класса 0 - фон, 1 - целевой класс
     этот лосс считает все 3 сразу (без перевычислений которые были бы если вызывать функции по отдельности)
     loss = average_loss_on_positive_pixels
         + average_loss_on_negative_pixels
@@ -133,7 +138,7 @@ def _prepare_detection_args(loss_fn):
 @_prepare_detection_args
 def pixel_positive_loss(y_true, y_pred):
     """
-    средний лосс по положительным (с точки зрения y_true) пикселям
+    Вычисляет средний лосс по положительным (с точки зрения y_true) пикселям
     """
     crossentropy_loss = K.binary_crossentropy(y_true, y_pred)  # .shape = (batch_size, h, w)
     positive_mask = y_true
@@ -147,7 +152,7 @@ def pixel_positive_loss(y_true, y_pred):
 @_prepare_detection_args
 def pixel_negative_loss(y_true, y_pred):
     """
-    средний лосс по отрицательным (с точки зрения y_true) пикселям
+    Вычисляет средний лосс по отрицательным (с точки зрения y_true) пикселям
     """
     crossentropy_loss = K.binary_crossentropy(y_true, y_pred)  # .shape = (batch_size, h, w)
     positive_mask = y_true
@@ -164,7 +169,7 @@ def pixel_negative_loss(y_true, y_pred):
 @_prepare_detection_args
 def pixel_hard_negative_loss(y_true, y_pred):
     """
-    средний лосс по худшим отрицательным(с точки зрения y_true) пикселям
+    Вычисляет средний лосс по худшим отрицательным(с точки зрения y_true) пикселям
     количество плохих пикселей берется max(1, min(n_positive_pixels, n_negative_pixels))
     """
     crossentropy_loss = K.binary_crossentropy(y_true, y_pred)  # .shape = (batch_size, h, w)
@@ -187,6 +192,11 @@ def pixel_hard_negative_loss(y_true, y_pred):
 
 
 def get_losses(classification_mode=False):
+    """
+    Возвращает список всех функций потерь
+    :param classification_mode:
+    :return:
+    """
     losses = [
         detection_loss,
         pixel_positive_loss,

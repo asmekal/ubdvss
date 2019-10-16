@@ -1,8 +1,8 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
-Reader для чтения разметки
+Классы для чтения разметки из различных форматов
 """
 import logging
 import os
@@ -35,6 +35,10 @@ BARCODE_2D_TYPES = BARCODE_2D_SQUARED_TYPES + ('PDF417',)
 
 
 class BaseMarkupReader:
+    """
+    Интерфейс для чтения разметки
+    """
+
     def __init__(self, path, net_config):
         self._path = path
         self._net_config = net_config
@@ -45,6 +49,9 @@ class BaseMarkupReader:
 
     @abstractmethod
     def get_list_of_images(self):
+        """
+        :return: список имен всех изобраений у этого ридера
+        """
         pass
 
     @abstractmethod
@@ -77,8 +84,8 @@ class DeployMarkupReader(BaseMarkupReader):
     def read_markup(self):
         for image_file in os.listdir(self.__images_folder_path):
             image_name, image_ext = os.path.splitext(image_file)
-            if image_ext in ['.jpg', '.tif', '.tiff']:
-                self.__markup[image_name] = []
+            if utils.is_image_extension(image_ext):
+                self.__markup[image_file] = []
 
     def get_list_of_images(self):
         return list(self.__markup.keys())
@@ -87,20 +94,20 @@ class DeployMarkupReader(BaseMarkupReader):
         return self.__markup[image_name]
 
     def get_image(self, image_name):
-        return Image.open(utils.find_corresponding_image(self.__images_folder_path, image_name)).convert('RGB')
+        return Image.open(os.path.join(self.__images_folder_path, image_name)).convert('RGB')
 
 
-class BarcodeMarkupReader(BaseMarkupReader):
+class FileMarkupReader(BaseMarkupReader):
     """
-    читает разметку по баркодам
+    Читает разметку в предположении, что есть отдельная директория с изображениями
+    и отдельная директория с файлами разметки, файлы в которых соответствуют друг другу по имени,
+    за исключением, возможно, расширения
     """
 
-    def __init__(self, path, net_config, images_folder='Image', markup_folder='Markup',
-                 barcode_type=BarcodeType.BARCODES_ALL):
+    def __init__(self, path, net_config, images_folder='Image', markup_folder='Markup'):
         super().__init__(path, net_config)
         self.__images_folder_path = os.path.join(path, images_folder)
         self.__markup_folder_path = os.path.join(path, markup_folder)
-        self.__barcode_type = barcode_type
         self.__markup = dict()
         self.__full_filename = dict()
 
@@ -116,7 +123,7 @@ class BarcodeMarkupReader(BaseMarkupReader):
         logging.info("Reading markup from {}".format(self.__images_folder_path))
         for markup_filename in os.listdir(self.__markup_folder_path):
             fname, ext = os.path.splitext(markup_filename)
-            if ext != '.xml':
+            if not self._is_markup_file_extension(ext):
                 continue
             try:
                 image_filename = utils.find_corresponding_image(self.__images_folder_path, fname)
@@ -129,12 +136,56 @@ class BarcodeMarkupReader(BaseMarkupReader):
                 logging.error("{} can't read {}".format(n_errors, e))
         logging.info("{}/{} files read successfully".format(n_successfull_reads, n_successfull_reads + n_errors))
 
+    @abstractmethod
+    def _is_markup_file_extension(self, ext):
+        """
+        Является ли данное расширение валидным для файла разметки
+        :param ext:
+        :return:
+        """
+        pass
+
+    @abstractmethod
     def _read_markup_from_file(self, markup_file_path, skip_empty_markup=True):
         """
-        читает разметку из файла
+        Читает разметку из файла
         :param markup_file_path: путь до файла с разметкой
         :param skip_empty_markup: пропускать файлы в которых не указана разметка
-        :return: список четырехугольников в которых находятся баркоды на изображении
+        :return: список объектов вида ObjectMarkup с информацией об объектах на изображении
+        """
+        pass
+
+    def get_image_markup(self, image_name):
+        """
+        :param image_name:
+        :return: разметка местоположения слов в виде списка объектов типа ObjectMarkup
+        """
+        return self.__markup[image_name]
+
+    def get_image(self, image_name):
+        """
+        :param image_name:
+        :return: изображения Image
+        """
+        return Image.open(os.path.join(self.__images_folder_path, self.__full_filename[image_name])).convert('RGB')
+
+
+class XMLBarcodeMarkupReader(FileMarkupReader):
+    """
+    Читает разметку для баркодов из xml, генерируемых нашими разметчиками
+    """
+
+    def __init__(self, path, net_config, images_folder='Image', markup_folder='Markup',
+                 barcode_type=BarcodeType.BARCODES_ALL):
+        super().__init__(path, net_config, images_folder=images_folder, markup_folder=markup_folder)
+        self.__barcode_type = barcode_type
+
+    def _read_markup_from_file(self, markup_file_path, skip_empty_markup=True):
+        """
+        Читает разметку из файла
+        :param markup_file_path: путь до файла с разметкой
+        :param skip_empty_markup: пропускать файлы в которых не указана разметка
+        :return: список объектов ObjectMarkup
         """
         markup = []
         words = xml.etree.ElementTree.parse(markup_file_path).getiterator("Barcode")
@@ -164,8 +215,7 @@ class BarcodeMarkupReader(BaseMarkupReader):
                              "are considered in markup".format(barcode_type))
                 continue
 
-            if self._net_config.is_classification_supported() \
-                    and not self._net_config.is_class_supported(barcode_type):
+            if not self._net_config.is_class_supported(barcode_type):
                 logging.info(f"Skippping barcode type \"{barcode_type}\","
                              f" not in current classification object types: {self._net_config.get_class_names()}")
                 continue
@@ -200,31 +250,49 @@ class BarcodeMarkupReader(BaseMarkupReader):
                 "Skipping suspicious empty markup file (no barcodes in markup) {}".format(markup_file_path))
         return markup
 
-    def get_image_markup(self, image_name):
-        """
-        :param image_name:
-        :return: разметка местоположения слов в виде листа из координат для каждого слова
-        [(x1, y1, x2, y2, x3, y3, x4, y4), ...]
-        # bottomRight, bottomLeft, topLeft, topRight
-        """
-        return self.__markup[image_name]
+    def _is_markup_file_extension(self, ext):
+        return ext.lower() == '.xml'
 
-    def get_image(self, image_name):
-        """
-        :param image_name:
-        :return: изображения Image
-        """
-        return Image.open(utils.find_corresponding_image(self.__images_folder_path, image_name)).convert('RGB')
+
+class SegmentationMapMarkupReader(FileMarkupReader):
+    """
+    Читает разметку из карт сегментаций (в виде многоугольников-контуров)
+    пока что было необходимо исключительно для чтения разметки из публичных датасетов,
+    в которых тип везде один и тот же (EAN13 -> 5)
+    """
+
+    def __init__(self, path, net_config, images_folder='Image', markup_folder='Detection'):
+        super().__init__(path, net_config, images_folder=images_folder, markup_folder=markup_folder)
+
+    def _is_markup_file_extension(self, ext):
+        return utils.is_image_extension(ext)
+
+    def _read_markup_from_file(self, markup_file_path, skip_empty_markup=True):
+        seg_map_image = Image.open(markup_file_path).convert('L')
+        contours, _ = utils.get_contours_and_boxes(seg_map_image, min_area=-1)
+        # приходится брать convex hull от контура,
+        # иначе shapely отказывается работать на невыпуклых контурах (когда считает intersection в evaluation)
+        # это вносит некоторую ошибку, но в большинстве случаев она будет пренебрежимо мала
+        # пример карты сегментации из которой получится невыпуклый контур:
+        # 0 0 1 0 0
+        # 0 0 1 0 0
+        # 1 1 1 1 1
+        # 0 0 1 0 0
+        # 0 0 1 0 0
+        # также здесь отфильтровываются все контура в которых только одна точка
+        # такие пока возникали только на датасете Artelab как артефакты разметки
+        return [ClassifiedObjectMarkup(utils.get_convex_hull(cnt).reshape((-1,)), 5)
+                for cnt in contours if len(utils.get_convex_hull(cnt).reshape((-1,))) > 2]
 
 
 # TODO: можно написать общий multipath reader а этот будет partial от него
-class MultiplePathBarcodeMarkupReader(BarcodeMarkupReader):
+class MultiplePathXMLMarkupReader(BaseMarkupReader):
     def __init__(self, paths, net_config, *args, **kwargs):
         if isinstance(paths, str):
             paths = paths.split(',')
         logging.info(f"Reading markup from {paths}")
         self._paths = paths
-        self._readers = [BarcodeMarkupReader(path, net_config, *args, **kwargs) for path in paths]
+        self._readers = [XMLBarcodeMarkupReader(path, net_config, *args, **kwargs) for path in paths]
 
     def get_list_of_images(self):
         return [

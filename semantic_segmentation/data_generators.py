@@ -1,8 +1,8 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
-Здесь генератор батчей для обучения сети
+Генератор батчей для обучения сети
 """
 
 import functools
@@ -13,8 +13,8 @@ import multiprocessing
 import numpy as np
 from PIL import PngImagePlugin
 
-from semantic_segmentation.markup_readers import BarcodeMarkupReader, \
-    MultiplePathBarcodeMarkupReader, DeployMarkupReader
+from semantic_segmentation.markup_readers import XMLBarcodeMarkupReader, \
+    MultiplePathXMLMarkupReader, SegmentationMapMarkupReader, DeployMarkupReader
 from semantic_segmentation.segmap_manager import SegmapManager
 
 # было обнаружено что некоторые картинки не пиклятся https://github.com/python-pillow/Pillow/issues/1434
@@ -24,9 +24,10 @@ PngImagePlugin.iTXt.__getnewargs__ = lambda x: (x.__str__(), '', '')
 sizes_cache_filename = "sizes_cache.h5py"
 
 supported_markup_types = {
-    "Barcode": BarcodeMarkupReader,
-    "Barcode_multipath": MultiplePathBarcodeMarkupReader,
-    "Barcode_deploy": DeployMarkupReader,
+    "Barcode": XMLBarcodeMarkupReader,
+    "BarcodeMultipath": MultiplePathXMLMarkupReader,
+    "BarcodeSegmap": SegmentationMapMarkupReader,
+    "BarcodeDeploy": DeployMarkupReader,
 }
 
 
@@ -41,10 +42,11 @@ class PreprocessedInfo:
 class MetaInfo:
     def __init__(self, filename, original_markup, xscale, yscale):
         """
-        Доп информация о картинке (не нужна при обучении, но полезна на валидации/тесте)
-        :param filename:
-        :param xscale: original.shape / resized.shape
-        :param yscale:
+        Дополнительная информация о картинке (не нужна при обучении, но полезна на валидации/тесте)
+        :param filename: имя файла с изображением или (_, filename)
+        :param original_markup: разметка на ИСХОДНОМ изображении (на большой не аугментированной картинке)
+        :param xscale: original.shape[0] / resized.shape[0]
+        :param yscale: original.shape[1] / resized.shape[1]
         """
         self.filename = filename[1] if isinstance(filename, (tuple, list)) else filename
         self.markup = original_markup
@@ -58,15 +60,25 @@ class BatchGenerator:
     """
 
     def __init__(self, path, batch_size, markup_type, net_config,
-                 validation_mode=False, n_workers=3, yield_incomplete_batches=True, prepare_batch_size=1000):
+                 use_augmentation=False,
+                 n_workers=3, yield_incomplete_batches=True, prepare_batch_size=1000, name="TrainGenerator"):
         """
         :param path: путь до разметки
         :param batch_size: размер одного батча
         :param markup_type: один из доступных типов чтения разметки - список смотреть в assert
+        :param net_config:
+        :param use_augmentation:
+        :param n_workers: количество потоков для предобработки изображений
+        :param yield_incomplete_batches: если установлено True могут появляться батчи размера меньше batch_size,
+                                         иначе размер батча константный и равен batch_size
+        :param prepare_batch_size: при генерации батчей сначала берется prepare_batch_size изображений из датасета,
+                                   затем они группируются по размеру, батчи формируются из полученных групп,
+                                   когда предобработанные изображения заканчиваются берутся новые и все повторяется
         """
         self._batch_size = batch_size
         self._net_config = net_config
-        self._validation_mode = validation_mode
+        self._use_augmentation = use_augmentation
+        self._name = name
         self.__n_workers = n_workers
         self.__prepare_batch_size = prepare_batch_size
         self.__yield_incomplete_batches = yield_incomplete_batches
@@ -81,35 +93,50 @@ class BatchGenerator:
 
     def get_images_per_epoch(self):
         """
-        возвращает размер датасета
+        Возвращает размер датасета
         """
         return len(self._image_names)
 
     def get_epoch_size(self):
         """
-        вычисляет примерное число итераций, составляющих одну эпоху
+        Вычисляет примерное число итераций, составляющих одну эпоху
         """
         return self.get_images_per_epoch() // self._batch_size
 
     def generate(self, add_metainfo=False):
         """
-        генерирует батчи сгруппированные по размеру изображений
+        Генерирует батчи сгруппированные по размеру изображений
         :param add_metainfo: если стоит True кроме (x, y) возвращает meta_info (доп информацию)
         :return: (batch_images, batch_targets, [meta_info])
         """
+        assert not (add_metainfo and self.is_augmentation_used()), "will produce invalid metainfo (scales)"
         preprocessing_fn = self._net_config.get_preprocessing_fn()
+        preprocessed_data = None
+        # при отсутствии аугментации можно сэкономить на постоянном считывании/предобработке картинок
+        # просто запомнив их, если ин не много (prepare_batch_size >= len(self._image_names))
+        is_cached = False
         while True:
             border_index = 0
-            if not self._validation_mode:
+            if self.is_augmentation_used():
                 np.random.shuffle(self._image_names)
 
             while border_index < len(self._image_names):
-                preprocessed_data = self._prepare_images(
-                    self._image_names[border_index:border_index + self.__prepare_batch_size],
-                    with_meta=add_metainfo
-                )
+                if (not is_cached
+                        and not self.is_augmentation_used()
+                        and preprocessed_data is not None
+                        and len(preprocessed_data) == len(self._image_names)):
+                    logging.info(f"data cached!, {len(self._image_names)} images are cached in generator {self._name}")
+                    is_cached = True
+                elif not is_cached:
+                    preprocessed_data = self._prepare_images(
+                        self._image_names[border_index:border_index + self.__prepare_batch_size],
+                        with_meta=add_metainfo
+                    )
+                    preprocessed_data.sort(key=lambda x: x.image.size)
+                else:
+                    # все данные уже посчитаны, ничего не надо делать
+                    pass
 
-                preprocessed_data.sort(key=lambda x: x.image.size)
                 for img_size, group in itertools.groupby(preprocessed_data, key=lambda x: x.image.shape):
                     group = list(group)
                     group_border_index = 0
@@ -136,7 +163,7 @@ class BatchGenerator:
 
     def _prepare_image(self, image_name, with_meta=False):
         """
-        нужно предпосчитать изображениe, размер + разметку
+        Нужно предпосчитать изображениe, размер + разметку
         :return PreprocessedInfo
         """
         try:
@@ -144,7 +171,7 @@ class BatchGenerator:
             markup = self._reader.get_image_markup(image_name)
             original_w, original_h = image.size
             image, _, target = SegmapManager.prepare_image_and_target(image, markup, self._net_config,
-                                                                      is_training=not self._validation_mode)
+                                                                      augment=self._use_augmentation)
 
             if self._net_config.is_grey():
                 image = image.convert('L')  # делаем серым
@@ -180,3 +207,6 @@ class BatchGenerator:
             return preprocessed_data
         else:
             return [x for x in map(map_fn, image_names) if x is not None]
+
+    def is_augmentation_used(self):
+        return self._use_augmentation

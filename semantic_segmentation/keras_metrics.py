@@ -1,8 +1,8 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
-Различные метрики
+Различные метрики для keras подсчитываемые при обучении
 """
 
 import functools
@@ -39,7 +39,7 @@ def _acc(true, pred, weights):
 
 def confusion_matrix(true, pred, weights):
     """
-    confusion matrix для бинарной классификации
+    Confusion matrix для бинарной классификации
     :param true:
     :param pred:
     :param weights:
@@ -66,18 +66,39 @@ def confusion_matrix(true, pred, weights):
 
 @_metric_wrapper
 def precision(true, pred, weights):
+    """
+    Вычисляет precision c учетом весов
+    :param true:
+    :param pred:
+    :param weights:
+    :return:
+    """
     tp, tn, fp, fn = confusion_matrix(true, pred, weights)
     return tp / K.maximum(1., tp + fp)
 
 
 @_metric_wrapper
 def recall(true, pred, weights):
+    """
+    Вычисляет recall с учетом весов
+    :param true:
+    :param pred:
+    :param weights:
+    :return:
+    """
     tp, tn, fp, fn = confusion_matrix(true, pred, weights)
     return tp / K.maximum(1., tp + fn)
 
 
 @_metric_wrapper
 def f1(true, pred, weights):
+    """
+    Вычисляет f1-меру с учетом весов
+    :param true:
+    :param pred:
+    :param weights:
+    :return:
+    """
     tp, tn, fp, fn = confusion_matrix(true, pred, weights)
     precision = tp / K.maximum(1., tp + fp)
     recall = tp / K.maximum(1., tp + fn)
@@ -93,27 +114,52 @@ def _get_detection_labels(y_true, y_pred):
 
 
 def detection_pixel_acc(y_true, y_pred):
+    """
+    Вычисляет попиксельную accuracy детекции
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
     detection_true, detection_pred = _get_detection_labels(y_true, y_pred)
     return _acc(detection_true, detection_pred)
 
 
 def detection_pixel_precision(y_true, y_pred):
+    """
+    Вычисляет попиксельню точность (precision) детекции
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
     detection_true, detection_pred = _get_detection_labels(y_true, y_pred)
     return precision(detection_true, detection_pred)
 
 
 def detection_pixel_recall(y_true, y_pred):
+    """
+    Вычисляет попиксельню полноту (recall) детекции
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
     detection_true, detection_pred = _get_detection_labels(y_true, y_pred)
     return recall(detection_true, detection_pred)
 
 
 def detection_pixel_f1(y_true, y_pred):
+    """
+    Вычисляет попиксельню f1-меру детекции
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
     detection_true, detection_pred = _get_detection_labels(y_true, y_pred)
     return f1(detection_true, detection_pred)
 
 
 def classification_pixel_acc(y_true, y_pred):
     """
+    Вычисляет попиксельную accuracy классификации
     считается только по y_true > 0 т.е. там где есть какой-то объект
     :param y_true:
     :param y_pred:

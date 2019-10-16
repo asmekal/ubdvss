@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
 Работа с картами сегментаций - построение, препроцессинг, постпроцессинг, аугментация и т.д.
 """
@@ -21,59 +21,37 @@ class SegmapManager:
     """
 
     @staticmethod
-    def prepare_image_and_target(image, markup, net_config, is_training=False):
+    def prepare_image_and_target(image, markup, net_config, augment=False):
         """
-        преобразовать изображение и разметку в формат принимаемый сеткой (заданный net_config),
+        Преобразовать изображение и разметку в формат принимаемый сеткой (заданный net_config),
         построить карту сегментаций
         :param image: исходное изображение
-        :param markup: разметка в виде списка четырехугольников заданных в виде [x1, y1, ..., x4, y4]
+        :param markup: разметка в виде списка ObjectMarkup
         :param net_config: конфигурация сети
-        :param is_training:
+        :param augment:
         :return: processed_image, processed_markup, segmentation_map
         """
-        if is_training:
+        if augment:
             image, markup = SegmapManager._augment(image, markup, net_config)
         rescaled_image, rescaled_markup = SegmapManager._rescale_image_and_markup(image, markup, net_config)
-        segmentation_map = SegmapManager._build_segmentation_map(rescaled_image, rescaled_markup,
-                                                                 scale=net_config.get_scale())
+        segmentation_map = SegmapManager.build_segmentation_map(rescaled_image, rescaled_markup,
+                                                                scale=net_config.get_scale())
         return rescaled_image, rescaled_markup, segmentation_map
 
     @staticmethod
-    def draw_markup(image, markup, result_fname=None):
+    def postprocess(seg_map, seg_map_class_logits=None, scale=1, min_area_threshold=5):
         """
-        возвращает изображение с отрисованной на нем разметкой
-        :param image:
-        :param markup:
-        :param result_fname: если не None, сохраняет туда получившееся изображение
-        :return: image_with_markup
-        """
-        seg_map = SegmapManager._build_segmentation_map(image, markup, scale=1, for_drawing=True)
-        return SegmapManager.draw_segmentation_map(image, seg_map, result_fname=result_fname)
-
-    @staticmethod
-    def get_bboxes_from_segmentation_map(seg_map, scale=1, min_block_threshold=5):
-        """
-        выполняет постпроцессинг, т.е. по полученной карте сегментаций возвращает найденные объекты
-        :param seg_map: карта сегментаций
+        Выполняет постпроцессинг, т.е. по полученной карте сегментаций возвращает найденные объекты
+        :param seg_map: карта сегментации чисто для детекции
+        :param seg_map_class_logits: карта сегментации для классификации объектов по типам
         :param scale: отношение размера исходного изображения к карте сегментаций
             (например изображение было 200x200, а карта сегментаций 50x50, тогда scale=4)
-        :param min_block_threshold: минимальное количество прилежащих друг к другу 1 в карте сегментации,
-            чтобы считаться задетекченным объектом (таким образом повышается precision
-            уменьшая количество случайных срабатываний)
-        :return: разметка в виде списка четырехугольников заданных в виде [x1, y1, ..., x4, y4]
+        :param min_area_threshold: минимальная площадь сегмента суперпикселей,
+            при которой он еще считается детекцией, а не шумом (таким образом повышается precision,
+            в результате уменьшения количества случайных срабатываний)
+        :return: список ObjectMarkup найденных объектов
         """
-        # ВНИМАНИЕ! opencv не всегда находит прямоугольник который покрывает прямо все точки контура
-        # возможна ошибка 2-3 пикселя (обычно справа и снизу изображения)
-        # из-за этого при постпроцессинге иногда теряются границы (особенно когда объекты прямо на границе изображения)
-        # править это и переписывать вручную считаю нецелесообразным, т.к. этот проект больше для исследования
-        # и для исследования такая ошибка не критична
-        contours, boxes = get_contours_and_boxes(seg_map, min_area=min_block_threshold)
-        boxes = [np.round(box * scale).astype(int) for box in boxes]
-        return boxes
-
-    @staticmethod
-    def postprocess(seg_map, seg_map_class_logits=None, scale=1, min_block_threshold=5):
-        contours, boxes = get_contours_and_boxes(seg_map, min_area=min_block_threshold)
+        contours, boxes = get_contours_and_boxes(seg_map, min_area=min_area_threshold)
         boxes = [np.round(box * scale).astype(int) for box in boxes]
         if seg_map_class_logits is None:
             return [ObjectMarkup(bbox) for bbox in boxes]
@@ -91,30 +69,17 @@ class SegmapManager:
         return [ClassifiedObjectMarkup(bbox, class_id) for bbox, class_id in zip(boxes, class_ids)]
 
     @staticmethod
-    def draw_segmentation_map(image, seg_map, result_fname=None, color=(0, 255, 0)):
-        """
-        возвращает изображение с отрисованной на нем картой сегментаций
-        :param image:
-        :param seg_map:
-        :param result_fname: если не None, сохраняет туда получившееся изображение
-        :param color: RGB цвет которым рисуется карта сегментации
-        :return: image_with_segmentation_map
-        """
-        colored_image = Image.blend(image, Image.new('RGB', image.size, color=color), alpha=0.5)
-        image_object = Image.composite(colored_image, image, seg_map)
-        if result_fname:
-            image_object.save(result_fname)
-        return image_object
-
-    @staticmethod
     def _augment(image, markup, net_config):
+        # это сильно ускоряет аугментацию, и, как следствие, обучение, однако может ухудшить качество
+        image, markup = SegmapManager._rescale_image_and_markup(image, markup, net_config)
+
         modifier = SegLinksImageAugmentation(image, markup, net_config)
         aug_image = modifier.get_modified_image()
         aug_markup = modifier.get_modified_markup()
         return aug_image, aug_markup
 
     @staticmethod
-    def _build_segmentation_map(image, markup, scale=1, for_drawing=False):
+    def build_segmentation_map(image, markup, scale=1, for_drawing=False):
         """
 
         :param image:
@@ -141,10 +106,14 @@ class SegmapManager:
     @staticmethod
     def _proper_round(markup_bbox):
         """
+        Округляет точки в разметке до целых, с учетом расположения остальных граничных точек в объекте
         надо правильно округлить, чтобы не потерять части объекта
-        :param markup_bbox: [x1, y1, ..., x4, y4] (координаты возможно не целые)
+        :param markup_bbox: [x1, y1, ..., x4, y4]
         :return:
         """
+        if len(markup_bbox) != 8:
+            # если попался многоугольник полученный из сегмапа не выпендриваемся и просто округляем
+            return np.array(markup_bbox).astype(np.int32)
         xs = markup_bbox[::2]
         ys = markup_bbox[1::2]
         assert len(xs) == len(ys) == 4
@@ -164,12 +133,21 @@ class SegmapManager:
         return np.ravel(list(zip(xs, ys))).astype(np.int32)
 
     @staticmethod
-    def _rescale_image_and_markup(image, markup, net_config):
+    def _rescale_image_and_markup(image, markup, net_config, max_side=None):
+        """
+        Возвращает перемасштабированныу картинку и разметку в соответствии с требованиями net_config
+        :param image:
+        :param markup:
+        :param net_config:
+        :param max_side: если указана, считает это значение максимумом вместо того что в net_config
+        :return:
+        """
         w, h = image.size
         # кратно какому минимальному размеру могут быть стороны
         side_multiple = net_config.get_side_multiple()
         # максимальный размер максимальной стороны изображения
-        max_side = net_config.get_max_side()
+        if max_side is None:
+            max_side = net_config.get_max_side()
 
         # если изображение слишком высокого разрешения - уменьшим его чтобы работало быстрее
         if max(w, h) > max_side:
@@ -189,6 +167,7 @@ class SegmapManager:
         resized_image = image.resize(size=(new_w, new_h), resample=Image.BICUBIC)  # TODO: check bilinear
         if not markup:
             return resized_image, markup
-        scales = np.array([new_w / w, new_h / h] * 4)
-        resized_markup = [m.create_same_markup(m.bbox * scales) for m in markup]
+        scales = np.array([[new_w / w, new_h / h]])
+        resized_markup = [
+            m.create_same_markup((np.array(m.bbox).reshape((-1, 2)) * scales).reshape((-1,))) for m in markup]
         return resized_image, resized_markup

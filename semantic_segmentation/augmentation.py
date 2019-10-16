@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 # Copyright (С) ABBYY (BIT Software), 1993 - 2017. All rights reserved.
 """
-класс для аугментации данных (кропы и повороты изображений и разметки)
+Класс для аугментации данных (кропы и повороты изображений и разметки)
+Основа заимствована из проекта FindText
+Зафиксировав seeds в этом файле (раскомментировав соответствующие строчки), можно добиться
+воспроизводимости порядка батчей и аугментации при обучении
 """
 
 import logging
@@ -12,19 +15,27 @@ import PIL
 import numpy as np
 from PIL import Image
 from imgaug import augmenters as iaa
+from imgaug import seed as imgaug_seed
 from shapely import affinity
 from shapely.geometry import Point, Polygon
 
 # Sometimes(0.5, ...) applies the given augmenter in 50% of all cases,
 # e.g. Sometimes(0.5, GaussianBlur(0.3)) would blur roughly every second image.
 sometimes = lambda aug: iaa.Sometimes(0.5, aug)
+# раскомментировав установки сидов ниже можно получить воспроизводимую аугментацию и порядок батчей и картинок в них
+# НО! если запускать многопроцессорно этот файл каждый раз будет переимпортится и сиды заново устанавливаться
+# так что мы получим фиксированный (порядка prepare_batch_size // n_processes) набор трансформаций
+# что все же не очень хорошо
+# random.seed(42)
+# np.random.seed(42)
+# imgaug_seed(42)
 
 
 class SegLinksImageAugmentation:
     def __init__(self, image, markup, net_config):
         """
-        класс для аугментации данных кропами и поворотами. Каждый элемент списка разметки имеет формат
-        x1, y1, x2, y2, x3, y3, x4, y4
+        Класс для аугментации данных кропами и поворотами. Каждый элемент списка разметки имеет формат
+        x1, y1, x2, y2, ..., xN, yN
         """
         self.__aug_image, self.__aug_markup = (image, markup)
         self.__net_config = net_config
@@ -37,20 +48,25 @@ class SegLinksImageAugmentation:
             logging.error(str(e) + " error while augmenting")
 
     def __augment_image(self, image, markup):
+        feed_original_probability = 0.1
         crop_probability = 0.5
         rotate_probability = 0.5
         rotate_90_probability = 0.5
+        # углы, на которые разрешено поворачивать изображения при rotate_90
+        rotation_90_angles = [90, -90, 180]
         # формально флипы нельзя баркодам (по крайней мере не всем),
         # но для детекции на самом деле не такая большая разница
         # TODO: можно включить
         horizontal_flip_probability = 0
         vertical_flip_probability = 0
-        # TODO: это можно добавить
-        perspective_distortion_probability = 0.0
+
+        perspective_distortion_probability = 0.5
         image_aug_probability = 0.7
 
         self.__aug_image = image.copy()
         self.__aug_markup = markup.copy()
+        if random.random() < feed_original_probability:
+            return self.__aug_image, self.__aug_markup
         if random.random() < rotate_probability:
             self.__aug_image, self.__aug_markup = self.__rotate(self.__aug_image, self.__aug_markup, -45, 45)
         if random.random() < crop_probability:
@@ -60,10 +76,8 @@ class SegLinksImageAugmentation:
         if random.random() < vertical_flip_probability:
             self.__aug_image, self.__aug_markup = self.__vertical_flip(self.__aug_image, self.__aug_markup)
         if random.random() < rotate_90_probability:
-            if random.random() < 0.5:
-                self.__aug_image, self.__aug_markup = self.__rotate(self.__aug_image, self.__aug_markup, 90, 90)
-            else:
-                self.__aug_image, self.__aug_markup = self.__rotate(self.__aug_image, self.__aug_markup, -90, -90)
+            angle = random.choice(rotation_90_angles)
+            self.__aug_image, self.__aug_markup = self.__rotate(self.__aug_image, self.__aug_markup, angle, angle)
         if random.random() < perspective_distortion_probability:
             self.__aug_image, self.__aug_markup = self.__perspective_distortion(self.__aug_image, self.__aug_markup)
         if random.random() < image_aug_probability:
@@ -81,11 +95,10 @@ class SegLinksImageAugmentation:
         # определяем границы разметки
         all_poly = Polygon()
         for box in markup:
-            word_poly = Polygon(np.reshape(box.bbox, [4, 2]))
+            word_poly = Polygon(np.reshape(box.bbox, [-1, 2]))
             all_poly = all_poly.union(word_poly)
 
         all_markup_rect = list(all_poly.bounds)
-
         # если прямоугольник получается с плохими пропорциями, то немного расширим его по одному из направлений
         all_markup_rect = SegLinksImageAugmentation.__normalize_rect(all_markup_rect, image.size)
 
@@ -112,7 +125,7 @@ class SegLinksImageAugmentation:
     @staticmethod
     def __normalize_rect(rect, image_size):
         """
-        проверяет, что пропорции прямоугольника не слишком сильно отличаются от пропорций изображения,
+        Проверяет, что пропорции прямоугольника не слишком сильно отличаются от пропорций изображения,
         и при необходимости увеличивает прямоугольник вдоль одной из сторон
         """
         new_rect = rect
@@ -205,9 +218,9 @@ class SegLinksImageAugmentation:
     @staticmethod
     def __transform_box(box, transform_matrix):
         """
-        прербразование четырехугольника с помощью матрицы преобразования 3*3
+        Прербразование многоугольники с помощью матрицы преобразования 3*3
         """
-        res = np.array(box).reshape((4, 2)).transpose()
+        res = np.array(box).reshape((-1, 2)).transpose()
         res = np.vstack((res, np.ones((1, res.shape[1]))))
         res = np.dot(transform_matrix, res)
         res /= res[-1, :]
@@ -217,7 +230,7 @@ class SegLinksImageAugmentation:
     def __horizontal_flip(image, markup):
         image = Image.fromarray(np.fliplr(image))
         for i, box in enumerate(markup):
-            for j in range(4):
+            for j in range(len(box) // 2):
                 box.bbox[j * 2] = image.width - box.bbox[j * 2]
             markup[i] = box
         return image, markup
@@ -226,7 +239,7 @@ class SegLinksImageAugmentation:
     def __vertical_flip(image, markup):
         image = Image.fromarray(np.flipud(image))
         for i, box in enumerate(markup):
-            for j in range(4):
+            for j in range(len(box) // 2):
                 box.bbox[j * 2 + 1] = image.height - box.bbox[j * 2 + 1]
             markup[i] = box
         return image, markup
@@ -234,10 +247,10 @@ class SegLinksImageAugmentation:
     @staticmethod
     def __rotate_box(box, angle, image_size, rotated_image_size):
         """
-        поворот четыерхугольника, x1, y1, x2, y2, x3, y3, x4, y4
+        Поворот многоугольника
         """
         rotated_box = []
-        for i in range(4):
+        for i in range(len(box) // 2):
             pt = Point(box[2 * i], box[2 * i + 1])
             pt = affinity.translate(pt, -image_size[0] / 2, -image_size[1] / 2)
             rotated_pt = affinity.rotate(pt, angle, origin=[0, 0], use_radians=False)
@@ -249,10 +262,10 @@ class SegLinksImageAugmentation:
     @staticmethod
     def __shift_box(box, dx, dy):
         """
-        сдвиг всех координат четырехугольника
+        Сдвиг всех координат многоугольника
         """
         shifted_box = []
-        for i in range(4):
+        for i in range(len(box) // 2):
             pt = Point(box[2 * i], box[2 * i + 1])
             pt = affinity.translate(pt, dx, dy)
             shifted_box.extend([pt.x, pt.y])
@@ -262,13 +275,15 @@ class SegLinksImageAugmentation:
     @staticmethod
     def __image_augmentation(image, markup):
         """
-        искажения изображения
+        Искажения изображения без разметки
         """
         seq = iaa.SomeOf((0, 5),
                          [
                              # (может очень сильно испортить текст на изображении, поэтому лучше не использовать)
-                             # оставлено, т.к. почему-то увеличивается recall ценой precision весьма значительно
-                             sometimes(iaa.Superpixels(p_replace=(0, 1.0), n_segments=(20, 200))),
+                             # была гипотеза что включением следующей строчки увеличивается recall ценой precision
+                             # но НЕТ - на последнем тесте это не подтвердилось, впрочем, окончательно сказать нельзя
+                             # так что строчка оставлена, если recall низкий - можно попробовать раскомментить
+                             # sometimes(iaa.Superpixels(p_replace=(0, 1.0), n_segments=(20, 200))),
                              # # convert images into their superpixel representation
                              # # p_replace-вероятность объединения соседних superpixel
                              # # n_segments-количество superpixel

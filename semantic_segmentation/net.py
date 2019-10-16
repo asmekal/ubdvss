@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# Copyright (С) ABBYY (BIT Software), 1993 - 2018. All rights reserved.
+# Copyright (С) ABBYY (BIT Software), 1993 - 2019. All rights reserved.
 """
 Все что связано непосредственно с архитектурой сети
     - конфигурационная информация о сети в NetConfig
@@ -24,6 +24,10 @@ from keras.models import Model, load_model
 from semantic_segmentation import losses, keras_metrics
 
 
+# относительная воспроизводимость (веса инициализируются теми же значениями)
+# tf.set_random_seed(42)
+
+
 class IdentityInitializer(keras.initializers.Initializer):
     """
     Инициализация как в статье https://arxiv.org/pdf/1511.07122.pdf
@@ -39,7 +43,7 @@ class IdentityInitializer(keras.initializers.Initializer):
 
 def ImageScaler(max_scale_power=1):
     """
-    возвращает keras.layer преобразующий батч входных изображений в
+    Возвращает keras.layer преобразующий батч входных изображений в
     [images, images // 2, images // 4, ..., images // 2**max_scale_power] список изображений в разных масштабах
     ("//" выше обозначает перемасштабирование а не деление)
     :param max_scale_power: сколько различных масштабов использовать
@@ -68,47 +72,52 @@ supported_preprocessing_types = {
 
 class NetConfig:
     """
-    Гиперпараметры сети использующиеся в других местах
+    Конфигурация сети и всей системы в целом
     """
 
     @staticmethod
-    def from_others(base_config, modification_config):
+    def from_others(base_config, side_multiple=None, max_image_side=None, min_pixels_for_detection=None):
         """
         Создает новый конфиг из base_config с заменой значений некоторых (архитектуро-независимых) параметров
-        на те что в modification_config
+        на те что в оставшихся параметрах
         :param base_config:
-        :param modification_config:
-        :return:
+        :param side_multiple: новое значение или None
+        :param max_image_side: новое значение или None
+        :param min_pixels_for_detection: новое значение или None
+        :return: new_config
         """
         new_config = copy.deepcopy(base_config)
-        new_config._side_multiple = modification_config._side_multiple
-        new_config._max_side = modification_config._max_side
-        new_config._min_pixels_for_detection = modification_config._min_pixels_for_detection
+        if side_multiple:
+            new_config._side_multiple = side_multiple
+        if max_image_side:
+            new_config._max_side = max_image_side
+        if min_pixels_for_detection:
+            new_config._min_pixels_for_detection = min_pixels_for_detection
         return new_config
 
     def __init__(self,
                  object_types_fname=None,
-                 scale=4, fml_compatible=True,
-                 side_multiple=64, max_side=512, min_pixels_for_detection=5,
+                 scale=4, fml_compatible=True, no_classification=False,
+                 side_multiple=64, max_image_side=512, min_pixels_for_detection=5,
                  preprocessing=PreprocessingType.NONE, grey=True):
         """
 
         :param scale: во сколько раз предсказываемая карта сегментаций меньше исходной кортинки по одному измерению
         :param fml_compatible: конвертируется ли в FML (правильные padding при stride > 1)
         :param side_multiple: размер картинок (должен быть) кратен этому параметру
-        :param max_side: размер максимальной стороны изображений
+        :param max_image_side: размер максимальной стороны изображений
         :param min_pixels_for_detection: минимальное количество пикселей в карте сегментации которые считается детекцией
         (т.е. если размер компоненты связности в карте сегментации не меньше этого значения - постпроцессим это как
         задетекченный блок - иначе СЧИТАЕМ ЧТО ТУТ НИЧЕГО НЕТ, мол это случайный шум)
         :param preprocessing: какой препроцессинг используется
         """
-        self._is_classification_supported = object_types_fname is not None
-        if self._is_classification_supported:
-            self._read_classnames_from_file(object_types_fname)
-            logging.info(f"Training classification with object types: {self._class_names}")
-        else:
+
+        if object_types_fname is None:
             self._class_names = None
-            logging.info("Training without classification")
+            self._is_classification_supported = False
+        else:
+            self._is_classification_supported = not no_classification
+            self._read_classnames_from_file(object_types_fname)
 
         self._grey = grey
         # во сколько раз предсказываемая карта сегментаций меньше исходной кортинки по одному измерению
@@ -119,8 +128,16 @@ class NetConfig:
 
         self._side_multiple = side_multiple
         # максимальный размер стороны изображения (длина или ширина)
-        self._max_side = max_side
+        self._max_side = max_image_side
         self._min_pixels_for_detection = min_pixels_for_detection
+
+    def log_classification_mode(self):
+        if self.is_classification_supported():
+            logging.info(f"Training classification with object types: {self._class_names}")
+        elif self._class_names is not None:
+            logging.info(f"Training WITHOUT classification, detection only for types: {self._class_names}")
+        else:
+            logging.info(f"Training WITHOUT classification, detection for any barcode in datasets")
 
     def is_grey(self):
         return self._grey
@@ -136,9 +153,6 @@ class NetConfig:
 
     def get_max_side(self):
         return self._max_side
-
-    def set_max_side(self, max_side):
-        self._max_side = max_side
 
     def is_fml_compatible(self):
         return self._fml_compatible
@@ -175,7 +189,7 @@ class NetConfig:
         return self._class_name_to_id[class_name]
 
     def is_class_supported(self, class_name):
-        return class_name in self._class_name_to_id
+        return self._class_names is None or class_name in self._class_name_to_id
 
     def is_classification_supported(self):
         return self._is_classification_supported
@@ -262,6 +276,11 @@ class NetManager:
         return self._net_config
 
     def _build_dilated_conv_model(self):
+        """
+        Стороит нейросеть и добавляет ее параметры в конфиг
+        текущая основная модель на dilated свертках
+        :return: net_config
+        """
         # основано на https://arxiv.org/pdf/1511.07122.pdf
         # все еще в процессе подбора оптимальной конфигурации
         image_channels = 1 if self._net_config.is_grey() else 3
@@ -284,20 +303,23 @@ class NetManager:
         # возможно этот слой не нужен (в оригинальной статье есть)
         x6 = conv_bn(x5, n_filters, dilation_rate=1, separable=False)
 
-        # x = keras.layers.concatenate([x1, x2, x3, x4, x5, x6])
-        # adapt features
-        # x = Conv2D(n_filters, (1, 1), padding='same', activation='relu')(x)
         x = x6
         # last dense layer
         n_classes = 0
         if self._net_config.is_classification_supported():
             n_classes = self._net_config.get_n_classes()
-        x = Conv2D(1 + n_classes, (3, 3), padding='same', activation=None)(x)
+        x = Conv2D(1 + n_classes, (1, 1), padding='same', activation=None)(x)
 
         self._model = Model(inputs=inputs, outputs=x, name='dilated_conv')
         self._net_config._scale = 4
 
     def _build_traditional_cnn(self):
+        """
+        Стороит нейросеть и добавляет ее параметры в конфиг
+        основа как в vgg, затем объединяем признаки с разных пространственных разрешений
+        это объединение основано на https://arxiv.org/abs/1611.06612 и http://bmvc2018.org/contents/papers/0494.pdf
+        :return:
+        """
         inputs = Input(shape=(None, None, 3))
         x = inputs
         n_filters = 32
@@ -334,13 +356,23 @@ class NetManager:
             n_output_channels=n_filters * 16,
             activation='relu'
         )
-        x = Conv2D(1, (3, 3), padding='same', activation='sigmoid')(x)
+        n_classes = 0
+        if self._net_config.is_classification_supported():
+            n_classes = self._net_config.get_n_classes()
+        x = Conv2D(1 + n_classes, (1, 1), padding='same', activation=None)(x)
 
         self._model = Model(inputs=inputs, outputs=x, name='multiscale_cnn')
         self._net_config._scale = 4
         self._net_config._side_multiple = max(64, self._net_config._side_multiple)
 
     def _build_multiscale_model(self, max_scale_power=3):
+        """
+        Стороит нейросеть и добавляет ее параметры в конфиг
+        эта модель просто подает одной и той же нейросети изображение в разных масштабах
+        и усредняет предсказанный результат
+        :param max_scale_power:
+        :return:
+        """
         self._build_dilated_conv_model()
         self._base_cnn = self._model
         input_images = Input(shape=(None, None, 3))
@@ -355,6 +387,30 @@ class NetManager:
 
         output = Lambda(lambda l: K.mean(K.concatenate(l, axis=-1), axis=-1, keepdims=True))(outputs)
         self._model = Model(inputs=input_images, outputs=output, name='multiscale_dilated')
+
+    @staticmethod
+    def _fuse_multiscale_features(features_list, n_output_channels, activation=None):
+        """
+        Собирает контекстную информацию из выходов разных слоев нейросети (с разным пространственным разрешением)
+        Выдает новую карту признаков с пространственным разрешением как у наибольшей из входных карт признаков
+            и количеством каналов n_output_channels
+        :param features_list: список карт признаков, полученных их слоев с разным пространственным разрешением,
+            отсортированы по убыванию пространственного размера со scale=2
+            (каждая следующая карта признаков в 2 раза меньше предыдущей в пространственном разрешении)
+        :param n_output_channels: количество выходов у карты признаков на выходе
+        :param activation: активация, которую использовать
+        :return:
+        """
+        prepared_features = []
+        for i, x in enumerate(features_list):
+            x = Conv2D(n_output_channels, (1, 1), padding='same', activation=None)(x)
+            if i > 0:
+                x = UpSampling2D((2 ** i, 2 ** i))(x)
+            prepared_features.append(x)
+        x = keras.layers.add(prepared_features)
+        if activation:
+            keras.layers.Activation(activation)(x)
+        return x
 
     def get_keras_model(self):
         return self._model
@@ -371,15 +427,25 @@ class NetManager:
         self._model.save(os.path.join(self._log_dir, NetManager.INFERENCE_MODEL_FILENAME))
 
     def load_another_model(self, another_log_dir):
+        """
+        Загрузить модель из другой директории с тем же конфигом (теми же архитектуро-зависимыми параметрами)
+        архитектуро-независимые параметры остаются теми же что и при инициализации текущего объекта NetManager
+        :param another_log_dir: директория из которой подгружается модель
+        :return:
+        """
         another_net_manager = NetManager(another_log_dir, self._net_config)
         another_net_manager.load_config()
         another_net_manager.load_model()
         self._model = another_net_manager._model
         self._net_config = NetConfig.from_others(another_net_manager._net_config, self._net_config)
-        # self._net_config = another_net_manager._net_config
         return self._net_config
 
     def load_model(self, path_to_model=None):
+        """
+        Загрузить модель (из self._log_dir директории)
+        :param path_to_model: путь до .h5 модели (абсолютный/относительный или от self._log_dir)
+        :return:
+        """
         # если вы действительно уверены что загружаете модель так чтобы конфиг был такой же
         # можете закомментить строчку внизу
         assert path_to_model is None, f"Programmer! Models are stored in log_dir, near their config. " \
@@ -426,17 +492,3 @@ class NetManager:
                                      'classification_pixel_acc': keras_metrics.classification_pixel_acc
                                  })
         return self._net_config
-
-    @staticmethod
-    def _fuse_multiscale_features(features_list, n_output_channels, activation=None):
-        # предполагается что features_list отсортированы по убыванию пространственного размера со scale=2
-        prepared_features = []
-        for i, x in enumerate(features_list):
-            x = Conv2D(n_output_channels, (1, 1), padding='same', activation=None)(x)
-            if i > 0:
-                x = UpSampling2D((2 ** i, 2 ** i))(x)
-            prepared_features.append(x)
-        x = keras.layers.add(prepared_features)
-        if activation:
-            keras.layers.Activation(activation)(x)
-        return x
