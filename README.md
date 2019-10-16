@@ -2,6 +2,8 @@
 
 Code for paper [Universal Barcode Detector via Semantic Segmentation](https://arxiv.org/abs/1906.06281)
 
+You can find some more details in readme_ru.md
+
 ### Disclaimer
 
 - We will not provide training dataset as it has commercial value. But our future work includes creation of good synthetic dataset which we hope to release in the near future
