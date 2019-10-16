@@ -2,7 +2,7 @@
 
 Code for paper [Universal Barcode Detector via Semantic Segmentation](https://arxiv.org/abs/1906.06281)
 
-### Warnings
+### Disclaimer
 
 - We will not provide training dataset as it has commercial value. But our future work includes creation of good synthetic dataset which we hope to release in the near future
 - We are not going to support this code as we are working on much more convenient pytorch implementation, which, again, we hope to release soon.
