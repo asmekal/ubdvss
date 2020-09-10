@@ -6,9 +6,22 @@ You can find some more details in readme_ru.md
 
 ### Disclaimer
 
-- We will not provide training dataset as it has commercial value. But our future work includes creation of good synthetic dataset which we hope to release in the near future
-- We are not going to support this code as we are working on much more convenient pytorch implementation, which, again, we hope to release soon.
+- We will not provide training dataset as it has commercial value. But our future work includes creation of good synthetic dataset which we hope to release in the near future (**UPD: you can find it [here](https://github.com/abbyy/barcode_detection_benchmark)**)
+- We are not going to support this code as we are working on much more convenient pytorch implementation, which, again, we hope to release soon (**UPD: you can find it [here](https://github.com/abbyy/barcode_detection_benchmark)**).
 - The comments are in Russian
+
+```
+@inproceedings{Zharkov2019,
+  TITLE = {{Universal Barcode Detector via Semantic Segmentation}},
+  AUTHOR = {Andrey Zharkov and Ivan Zagaynov},
+  BOOKTITLE = {{15th International Conference on Document Analysis and Recognition (ICDAR)}},
+  ADDRESS = {Sydney, Australia},
+  YEAR = {2019},
+  MONTH = Sep,
+  pages={837--843},
+  doi={10.1109/ICDAR.2019.00139},
+}
+```
 
 Copyright © 2019 ABBYY Production LLC
 
